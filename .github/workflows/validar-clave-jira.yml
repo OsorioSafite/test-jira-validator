@@ -1,0 +1,114 @@
+# Compuerta A · Clave de Jira presente en el Pull Request
+#
+# Ubicacion: .github/workflows/validar-clave-jira.yml
+#
+# Que hace:  valida que el nombre de la rama O el titulo del PR contengan
+#            una clave de Jira. Es puro formato: NO consulta la API de Jira,
+#            no usa secretos y no depende de que Atlassian este arriba.
+#
+# Como bloquea el merge:
+#   1. El codigo de salida de este job define el estado del check
+#      (exit 0 = verde, exit 1 = rojo).
+#   2. En las reglas de proteccion de `master`, marcar este check como
+#      requerido. GitHub deshabilita el boton de merge mientras este rojo.
+#
+# IMPORTANTE: abrir un PR y dejar correr el check UNA VEZ antes de crear la
+# regla de proteccion. El nombre del check solo aparece en el autocompletado
+# de GitHub despues de haberse reportado.
+#
+# Severidad: se controla con la variable de repositorio JIRA_KEY_GATE_MODE
+#   warn  (o sin definir) -> avisa pero deja pasar. Para el rollout inicial.
+#   block                 -> falla el check y bloquea el merge.
+
+name: Clave de Jira
+
+on:
+  pull_request:
+    # `edited` es indispensable: la compuerta lee el TITULO del PR, y sin este
+    # evento el check no se vuelve a correr cuando alguien corrige el titulo.
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  clave:
+    # Este nombre es el que hay que registrar en la regla de proteccion.
+    # Si algun dia se refactoriza a workflow reutilizable, el nombre cambia
+    # y hay que actualizar la regla o el PR queda esperando para siempre.
+    name: Clave de Jira presente
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validar clave en rama o titulo
+        env:
+          RAMA: ${{ github.head_ref }}
+          TITULO: ${{ github.event.pull_request.title }}
+          MODO: ${{ vars.JIRA_KEY_GATE_MODE }}
+        run: |
+          set -euo pipefail
+
+          # Los \b (limites de palabra) evitan un falso positivo real:
+          # sin ellos, una rama "RELEASE-2024" hace match con "EASE-2024".
+          PATRON='\b[A-Z]{2,6}-[0-9]+\b'
+
+          # Variante mas estricta, con lista blanca de los proyectos en uso.
+          # Atrapa typos de prefijo (EPR-1234) a cambio de mantenimiento
+          # cuando aparezca un proyecto nuevo en Jira:
+          # PATRON='\b(ERP|SIS|SOP|GEN|SS|MDA|RH|DEV|MOD|ALMC)-[0-9]+\b'
+
+          CLAVE=$(printf '%s %s' "$RAMA" "$TITULO" \
+            | grep -oE "$PATRON" | head -1 || true)
+
+          # ---------- Caso feliz ----------
+          if [ -n "$CLAVE" ]; then
+            echo "Clave encontrada: $CLAVE"
+            {
+              echo "## Ticket \`$CLAVE\`"
+              echo ""
+              echo "| | |"
+              echo "|---|---|"
+              echo "| Rama | \`$RAMA\` |"
+              echo "| Titulo | $TITULO |"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # ---------- Falta la clave ----------
+          # El step summary lleva la explicacion completa y como arreglarlo.
+          # Es la diferencia entre una compuerta que la gente entiende y una
+          # que odia.
+          {
+            echo "## Este Pull Request no tiene clave de Jira"
+            echo ""
+            echo "Ni la rama ni el titulo contienen una clave con formato \`ERP-1234\`."
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Rama | \`$RAMA\` |"
+            echo "| Titulo | $TITULO |"
+            echo ""
+            echo "### Como arreglarlo"
+            echo ""
+            echo "Cualquiera de las dos opciones sirve:"
+            echo ""
+            echo "1. **Editar el titulo del PR** y ponerle la clave adelante:"
+            echo "   \`[ERP-1234] $TITULO\`"
+            echo "2. **Renombrar la rama** para que incluya la clave: \`ERP-1234\`"
+            echo ""
+            echo "Al editar el titulo, este check se vuelve a correr solo."
+            echo ""
+            echo "### Por que"
+            echo ""
+            echo "Sin la clave en el PR no se puede reconstruir despues que"
+            echo "cambio salio en cada version, ni avisarle al cliente"
+            echo "correcto cuando algo lo impacta."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${MODO:-warn}" = "block" ]; then
+            echo "::error title=Falta la clave de Jira::Ni la rama '$RAMA' ni el titulo traen una clave tipo ERP-1234. Edita el titulo del PR y ponele la clave adelante."
+            exit 1
+          fi
+
+          echo "::warning title=Falta la clave de Jira::Modo advertencia: por ahora deja pasar. Cuando la compuerta entre en modo bloqueo, un PR asi no se va a poder mergear."
+          exit 0
