@@ -1,0 +1,169 @@
+# Pieza 7 · Comentario de despliegue en el ticket de Jira
+#
+# Ubicacion: .github/workflows/comentar-despliegue-jira.yml
+#
+# Simula lo que hara el pipeline real al final de un deploy a produccion:
+# dejar constancia en el ticket. Es la memoria permanente que sobrevive al
+# borrado del historial de Slack a los 90 dias.
+#
+# Se dispara a mano (workflow_dispatch) porque en el diseño real esto NO
+# corre en cada PR: corre una vez, al terminar el despliegue.
+#
+# El modo `dry-run` muestra el comentario que escribiria SIN escribirlo.
+# Usalo siempre primero: un comentario en Jira es visible para todos.
+#
+# Variables y secretos (a nivel de repositorio):
+#   vars.JIRA_BASE_URL        https://TU-SUBDOMINIO.atlassian.net
+#   secrets.JIRA_USER_EMAIL   correo de la cuenta dueña del token
+#   secrets.JIRA_API_TOKEN    API token con permiso Add Comments
+
+name: Comentar despliegue en Jira
+
+on:
+  workflow_dispatch:
+    inputs:
+      tickets:
+        description: "Claves separadas por coma (simula el resolutor de un release)"
+        required: true
+        default: "DEVOP-1"
+      version:
+        description: "Tag de version desplegado"
+        required: true
+        default: "2026.09.005.00"
+      environment:
+        description: "Ambiente"
+        required: true
+        default: "dev"
+        type: choice
+        options: [dev, prod]
+      deployment-mode:
+        description: "dry-run muestra el comentario sin escribirlo"
+        required: true
+        default: "dry-run"
+        type: choice
+        options: [dry-run, execute]
+
+permissions:
+  contents: read
+
+jobs:
+  comentar:
+    name: Comentar en los tickets del release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Publicar comentario de despliegue
+        env:
+          TICKETS: ${{ inputs.tickets }}
+          VERSION: ${{ inputs.version }}
+          AMBIENTE: ${{ inputs.environment }}
+          MODO: ${{ inputs['deployment-mode'] }}
+          JIRA_BASE_URL: ${{ vars.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+
+          if [ -z "${JIRA_BASE_URL:-}" ] || [ -z "${JIRA_USER_EMAIL:-}" ] || [ -z "${JIRA_API_TOKEN:-}" ]; then
+            echo "::error::Faltan vars.JIRA_BASE_URL, secrets.JIRA_USER_EMAIL o secrets.JIRA_API_TOKEN."
+            exit 1
+          fi
+
+          if [ "$AMBIENTE" = "prod" ]; then
+            AMBIENTE_TXT="PRODUCCION"
+          else
+            AMBIENTE_TXT="DESARROLLO"
+          fi
+
+          FECHA=$(date -u '+%Y-%m-%d %H:%M UTC')
+          TEXTO="Desplegado a $AMBIENTE_TXT · version $VERSION · $FECHA"
+
+          # El cuerpo va en ADF (Atlassian Document Format), no en texto plano.
+          # Se arma con jq para no pelear con el escapado de comillas.
+          armar_adf() {
+            jq -n --arg t "$1" --arg u "$2" '{
+              body: {
+                type: "doc",
+                version: 1,
+                content: [
+                  { type: "paragraph", content: [ { type: "text", text: $t } ] },
+                  { type: "paragraph", content: [
+                      { type: "text", text: "Run: " },
+                      { type: "text", text: $u,
+                        marks: [ { type: "link", attrs: { href: $u } } ] }
+                  ] }
+                ]
+              }
+            }'
+          }
+
+          {
+            echo "## Comentario de despliegue"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Version | \`$VERSION\` |"
+            echo "| Ambiente | $AMBIENTE_TXT |"
+            echo "| Modo | \`$MODO\` |"
+            echo ""
+            echo "\`\`\`"
+            echo "$TEXTO"
+            echo "Run: $RUN_URL"
+            echo "\`\`\`"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$MODO" != "execute" ]; then
+            echo "Modo $MODO: no se escribe nada en Jira."
+            echo "> Modo \`$MODO\`: nada se escribio en Jira." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          FALLOS=0
+          echo "| Ticket | Resultado |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+
+          # Recorre las claves separadas por coma, recortando espacios.
+          echo "$TICKETS" | tr ',' '\n' | while read -r RAW; do
+            CLAVE=$(printf '%s' "$RAW" | tr -d '[:space:]')
+            [ -z "$CLAVE" ] && continue
+
+            if [ "$MODO" != "execute" ]; then
+              # En dry-run solo verificamos que el ticket exista y sea visible.
+              HTTP=$(curl -sS -o /dev/null -w '%{http_code}' \
+                -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+                -H "Accept: application/json" \
+                "$JIRA_BASE_URL/rest/api/3/issue/$CLAVE?fields=summary" || echo "000")
+              if [ "$HTTP" = "200" ]; then
+                echo "| \`$CLAVE\` | existe, se comentaria |" >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "| \`$CLAVE\` | **HTTP $HTTP** — no se podria comentar |" >> "$GITHUB_STEP_SUMMARY"
+                echo "::warning::$CLAVE devolvio HTTP $HTTP en la verificacion."
+              fi
+              continue
+            fi
+
+            RESP=$(mktemp)
+            HTTP=$(curl -sS -o "$RESP" -w '%{http_code}' -X POST \
+              -u "$JIRA_USER_EMAIL:$JIRA_API_TOKEN" \
+              -H "Accept: application/json" \
+              -H "Content-Type: application/json" \
+              --data "$(armar_adf "$TEXTO" "$RUN_URL")" \
+              "$JIRA_BASE_URL/rest/api/3/issue/$CLAVE/comment" || echo "000")
+
+            if [ "$HTTP" = "201" ]; then
+              ID=$(jq -r '.id // "?"' "$RESP")
+              echo "Comentario creado en $CLAVE (id $ID)"
+              echo "| \`$CLAVE\` | comentado, id \`$ID\` |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::error::No se pudo comentar en $CLAVE. HTTP $HTTP"
+              echo "| \`$CLAVE\` | **fallo, HTTP $HTTP** |" >> "$GITHUB_STEP_SUMMARY"
+              FALLOS=$((FALLOS + 1))
+            fi
+          done
+
+          # Nota: el `while` corre en subshell por el pipe, asi que FALLOS no
+          # se propaga. En el reusable definitivo esto se resuelve con un
+          # archivo temporal o un bucle sin pipe. Para el spike alcanza con
+          # leer el resumen y las anotaciones.
+          exit 0
