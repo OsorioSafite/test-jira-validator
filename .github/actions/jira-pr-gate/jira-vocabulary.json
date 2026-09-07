@@ -1,0 +1,46 @@
+{
+  "_readme": [
+    "Jira label vocabulary. This is DATA, not code.",
+    "Adding a client or a new scope happens here, without touching scripts.",
+    "Any alc-* or cli-* label missing from this file is reported as unknown,",
+    "so a typo is noisy instead of silently falling into the default case.",
+    "",
+    "priority: precedence when a ticket carries more than one scope.",
+    "Highest wins. A release takes the maximum across its tickets.",
+    "",
+    "Label values and display text stay in Spanish on purpose: the labels",
+    "must match Jira exactly, and the display text is read by Mesa de Ayuda."
+  ],
+
+  "scopes": [
+    {
+      "label": "alc-transversal",
+      "display": "TRANSVERSAL",
+      "emoji": "🔵",
+      "priority": 3,
+      "note": "Impacta a todos los clientes"
+    },
+    {
+      "label": "alc-cliente",
+      "display": "CLIENTE ESPECIFICO",
+      "emoji": "🟠",
+      "priority": 2,
+      "note": "Impacta a uno o pocos clientes"
+    },
+    {
+      "label": "alc-interno",
+      "display": "INTERNO",
+      "emoji": "⚪",
+      "priority": 1,
+      "note": "Sin impacto visible para el cliente"
+    }
+  ],
+
+  "approvalLabel": "avalado-cliente",
+
+  "clients": {
+    "cli-almacafe": "Almacafé Cargo",
+    "cli-suramericana": "Suramericana",
+    "cli-transandinos": "Transandinos"
+  }
+}

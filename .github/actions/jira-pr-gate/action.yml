@@ -1,0 +1,124 @@
+name: 'Jira PR Gate'
+description: 'Validates that a Pull Request carries a Jira key, and reports the ticket scope from its labels'
+author: 'Safite'
+
+# Composite action on purpose, not a reusable workflow:
+#
+#  * Its own files travel with it. `jira-vocabulary.json` and the scripts are
+#    downloaded together with the action, so a consumer repo needs no checkout
+#    of cicd-toolkit and no token to read it.
+#  * The check name stays stable. With a composite action the reported check is
+#    the caller job's `name:`, identical whether the action is local or remote.
+#    So the branch ruleset is registered once and survives the migration to
+#    safite/cicd-toolkit.
+#
+# Configuration is explicit inputs, never implicit `vars`, matching the
+# contract style of the existing reusables in cicd-toolkit.
+
+inputs:
+  mode:
+    description: 'warn = annotate only · block = fail the check and block the merge'
+    required: false
+    default: 'warn'
+  key-pattern:
+    description: 'Extended regex for a Jira key. Word boundaries prevent RELEASE-2024 matching as EASE-2024.'
+    required: false
+    default: '\b[A-Z]{2,6}-[0-9]+\b'
+  vocabulary:
+    description: 'Path to the label vocabulary. Defaults to the copy bundled with this action.'
+    required: false
+    default: ''
+  jira-base-url:
+    description: 'https://<subdomain>.atlassian.net — leave empty to skip the Jira lookup entirely'
+    required: false
+    default: ''
+  jira-user-email:
+    description: 'Atlassian account that owns the API token'
+    required: false
+    default: ''
+  jira-api-token:
+    description: 'Jira API token. Needs only Browse Projects.'
+    required: false
+    default: ''
+
+outputs:
+  key:
+    description: 'The Jira key found, empty when none matched'
+    value: ${{ steps.extract.outputs.key }}
+  scope:
+    description: 'Resolved scope display name, empty when Jira was not reachable'
+    value: ${{ steps.resolve.outputs.scope }}
+  approved:
+    description: 'true when the ticket carries the approval label'
+    value: ${{ steps.resolve.outputs.approved }}
+
+runs:
+  using: composite
+  steps:
+    # ── 1 · Format only. No network, no credentials. Never fails. ─────────
+    - name: Extract Jira key
+      id: extract
+      shell: bash
+      env:
+        BRANCH: ${{ github.head_ref }}
+        TITLE: ${{ github.event.pull_request.title }}
+        PATTERN: ${{ inputs.key-pattern }}
+      run: ${{ github.action_path }}/scripts/extract-key.sh
+
+    # ── 2 · The gate. The ONLY step that can fail the check. ──────────────
+    - name: Apply merge gate
+      shell: bash
+      env:
+        KEY: ${{ steps.extract.outputs.key }}
+        MODE: ${{ inputs.mode }}
+        BRANCH: ${{ github.head_ref }}
+        TITLE: ${{ github.event.pull_request.title }}
+      run: ${{ github.action_path }}/scripts/apply-gate.sh
+
+    # ── 3 · Jira lookup. Never fails; reports why through `status`. ───────
+    - name: Fetch issue from Jira
+      id: fetch
+      if: steps.extract.outputs.key != ''
+      shell: bash
+      env:
+        KEY: ${{ steps.extract.outputs.key }}
+        JIRA_BASE_URL: ${{ inputs.jira-base-url }}
+        JIRA_USER_EMAIL: ${{ inputs.jira-user-email }}
+        JIRA_API_TOKEN: ${{ inputs.jira-api-token }}
+        ISSUE_FILE: ${{ runner.temp }}/jira-issue.json
+      run: ${{ github.action_path }}/scripts/fetch-issue.sh
+
+    # ── 4 · All label logic, declarative, driven by the vocabulary. ───────
+    - name: Resolve scope from labels
+      id: resolve
+      if: steps.fetch.outputs.status == 'ok'
+      shell: bash
+      env:
+        VOCABULARY: ${{ inputs.vocabulary }}
+        DEFAULT_VOCABULARY: ${{ github.action_path }}/jira-vocabulary.json
+        ISSUE_FILE: ${{ runner.temp }}/jira-issue.json
+        RESULT_FILE: ${{ runner.temp }}/jira-result.json
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        source "$ACTION_PATH/scripts/lib.sh"
+        VOCAB="${VOCABULARY:-$DEFAULT_VOCABULARY}"
+        [[ -f "$VOCAB" ]] || { fail "Vocabulary not found" "No file at $VOCAB"; exit 1; }
+
+        jq -n \
+          --argjson vocab "$(cat "$VOCAB")" \
+          --argjson issue "$(cat "$ISSUE_FILE")" \
+          -f "$ACTION_PATH/scripts/resolve-labels.jq" >"$RESULT_FILE"
+
+        set_output scope    "$(jq -r '.scope' "$RESULT_FILE")"
+        set_output approved "$(jq -r '.approved' "$RESULT_FILE")"
+
+    # ── 5 · Rendering only. No decisions. ────────────────────────────────
+    - name: Render job summary
+      if: steps.extract.outputs.key != ''
+      shell: bash
+      env:
+        KEY: ${{ steps.extract.outputs.key }}
+        FETCH_STATUS: ${{ steps.fetch.outputs.status }}
+        RESULT_FILE: ${{ runner.temp }}/jira-result.json
+      run: ${{ github.action_path }}/scripts/render-summary.sh
