@@ -1,0 +1,40 @@
+# Caller workflow. Deliberately thin: triggers, wiring, nothing else.
+#
+# This is the file each consumer repo copies. When the action moves to
+# safite/cicd-toolkit, only the `uses:` line changes:
+#
+#     uses: safite/cicd-toolkit/.github/actions/jira-pr-gate@main
+#
+# and the `actions/checkout` step disappears, because a remote action
+# downloads itself. The job `name:` is what the branch ruleset registers, so
+# it must stay exactly as it is in every repo.
+
+name: Validate Jira Key
+
+on:
+  pull_request:
+    # `edited` is essential: the gate reads the PR TITLE, so correcting the
+    # title has to re-trigger the check.
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  jira-key:
+    # ⚠️  Registered in the branch ruleset as a required check.
+    #     Renaming this breaks the rule silently — the PR then waits forever
+    #     for a check nobody reports.
+    name: Jira key present
+    runs-on: ubuntu-latest
+
+    steps:
+      # Only needed while the action lives in this repo.
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/jira-pr-gate
+        with:
+          mode: ${{ vars.JIRA_KEY_GATE_MODE || 'warn' }}
+          jira-base-url: ${{ vars.JIRA_BASE_URL }}
+          jira-user-email: ${{ secrets.JIRA_USER_EMAIL }}
+          jira-api-token: ${{ secrets.JIRA_API_TOKEN }}
